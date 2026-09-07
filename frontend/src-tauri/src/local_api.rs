@@ -6,10 +6,10 @@
 //! `stop_recording_and_notify` for stop).
 //!
 //! Endpoints:
-//! - `GET  /status` → `{"recording": bool}`
+//! - `GET  /status` → `{"recording": bool, "paused": bool, "folder_path": string|null}`
 //! - `POST /start`  → body `{"title"?: string, "metadata"?: string}`; metadata is
 //!   injected by the frontend as the first transcript segment of the meeting
-//! - `POST /stop`   → `{"status": "stopped"}`; meeting save runs asynchronously
+//! - `POST /stop`   → `{"status": "stopped", "folder_path": string|null}`; save runs asynchronously
 //!   in the frontend exactly like a tray-initiated stop
 
 use axum::{
@@ -65,7 +65,22 @@ pub async fn serve(app: AppHandle<Wry>) {
 }
 
 async fn status_handler(State(_app): State<AppHandle<Wry>>) -> Json<Value> {
-    Json(json!({ "recording": recording_commands::is_recording().await }))
+    let recording = recording_commands::is_recording().await;
+    let paused = if recording {
+        recording_commands::is_recording_paused().await
+    } else {
+        false
+    };
+    let folder_path = if recording {
+        recording_commands::get_meeting_folder_path().await.ok().flatten()
+    } else {
+        None
+    };
+    Json(json!({
+        "recording": recording,
+        "paused": paused,
+        "folder_path": folder_path,
+    }))
 }
 
 async fn start_handler(
@@ -142,12 +157,14 @@ async fn stop_handler(State(app): State<AppHandle<Wry>>) -> (StatusCode, Json<Va
         );
     }
 
+    // The recording manager is dropped inside stop_recording, so read this first.
+    let folder_path = recording_commands::get_meeting_folder_path().await.ok().flatten();
     set_tray_state(&app, RecordingState::Stopping);
 
     match recording_commands::stop_recording_and_notify(app.clone()).await {
         Ok(_) => {
             log::info!("Local API: recording stopped successfully");
-            (StatusCode::OK, Json(json!({ "status": "stopped" })))
+            (StatusCode::OK, Json(json!({ "status": "stopped", "folder_path": folder_path })))
         }
         Err(e) => {
             log::error!("Local API: failed to stop recording: {}", e);
